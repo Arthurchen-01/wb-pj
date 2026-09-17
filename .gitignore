@@ -1,0 +1,14 @@
+﻿# 运行产物 / 备份
+unlock-log.txt
+snapshot/
+*.unlockbak
+*.bak
+*.nobom
+*.pre-*.bak
+
+# 卡密 / 凭据，绝不入库
+*.dat
+*.key
+*.token
+.env
+.git-credentials
