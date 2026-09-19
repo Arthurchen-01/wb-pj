@@ -1,4 +1,4 @@
-﻿# WorkBuddy 一键破甲 v2.4
+﻿# WorkBuddy 一键破甲 v2.6
 
 WorkBuddy 客户端的提示词替换工具。**明文 PowerShell 脚本，无卡密、无联网、无授权校验。**
 
@@ -16,8 +16,8 @@ WorkBuddy 的提示词**不是存在单一文件里**，而是分散在多个位
 | **L1 政策层** | `<安装>\resources\templates\*.tpl`、`<安装>\cli\product.json` | 把 `<content_policy>` 严格政策块整体替换为宽松「交付标准」政策 |
 | **L2 安全块层** | 同上（政策块**之后**的两个独立块） | `<personal_files_safety>` / `<windows_command_safety>` 改写为同语义的中性表述 |
 | **L3 命令闸门层** | `<安装>\cli\dist\codebuddy*.js` | 在 `checkBashSecurityWindows` / `checkPowerShellSecurity` 函数入口注入短路返回 |
-| **L4 生命周期钩子** | `<数据>\.workbuddy\settings.json` 的 `hooks` 键 | 会话开始 / 每轮提问 / 上下文压缩前，把政策经**官方注入通道**重新注入 |
-| **L5 返回路径守卫** | 同上（`Stop` / `SubagentStop` 事件） | 命中硬拒绝句式或征询式反问时，让模型接着产出交付物 |
+| **L4 生命周期钩子** | 各配置目录的 `settings.json`（`<数据>\.workbuddy` 与 `<数据>\.workbuddy-ai`）的 `hooks` 键 | 会话开始 / 每轮提问 / 上下文压缩前，把政策经**官方注入通道**重新注入 |
+| **L5 返回路径守卫** | 同上（`Stop` / `SubagentStop` 事件） | 命中硬拒绝句式、征询式反问或索要授权时，让模型接着产出交付物 |
 
 ### 为什么是「五层」——各层解决不同问题
 
@@ -118,6 +118,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File unlock-workbuddy.ps1 -All -D
 | `-NoHooks` | 不部署生命周期钩子（默认**部署**） |
 | `-NoStopGuard` | 只注入、不做返回路径纠正（默认**纠正**） |
 | `-UninstallHooks` | 只卸载钩子，不碰其它三层 |
+| **v2.5** | |
+| `-NoHookPatch` | 不给钩子超时加 fail-open 补丁（默认**加**） |
 | **其他** | |
 | `-InstallDir` / `-DataDir` | 手动指定路径 |
 | `-Overlay` | 追加末尾兜底段（**默认关闭且不推荐**，见下） |
@@ -290,7 +292,9 @@ tools/                        独立复核与端到端验证脚本
 | v1 | 明文 ps1 | 1 层（仅 `*.tpl`） |
 | v4 | 编译 exe | 6 层 + 卡密校验 |
 | v5 | 明文 ps1 | 6 层 + 无卡密 |
-| **v2.4** | **明文 ps1** | **5 层重构：政策 / 安全块 / 命令闸门 / 生命周期钩子 / 返回路径守卫** |
+| v2.4 | 明文 ps1 | 5 层重构：政策 / 安全块 / 命令闸门 / 生命周期钩子 / 返回路径守卫 |
+| v2.5 | 明文 ps1 | 钩子可靠性：超时 10s→60s + 客户端 fail-open 补丁；政策补「授权上下文」条款，消除索要授权书式拒绝 |
+| **v2.6** | **明文 ps1** | **钩子逐配置目录部署（修复 WorkBuddyAI 层静默失效）+ 钩子脚本回归纯 ASCII** |
 
 v2.x 系列相对 v5 的实质改进：
 
@@ -303,6 +307,41 @@ v2.x 系列相对 v5 的实质改进：
 4. **原生钩子注入（新增能力）** —— v5 完全没有 L4/L5，长会话政策稀释问题无解。
 5. **完整验证体系** —— 独立复核脚本 + 端到端探针 + A/B 对照，所有结论有实测数据。
    见 `docs/`。
+
+### v2.5 / v2.6 修的两个真问题
+
+**v2.5 · 钩子超时吞消息。** v2.4 把钩子超时硬编码成 10 秒，磁盘高负载下被击穿。
+客户端日志原文：
+
+```
+[HookExecutor] spawn ... timeout=10000ms
+Hook timed out after 10000ms
+[HookExecutor] abnormal exit elapsed=11366ms timedOut=true
+UserPromptSubmit operation blocked by hook
+```
+
+后果不是"这轮政策没重申"，而是**用户提问整条被吞掉**。修法两层：
+超时抬到 60 秒（CLI 自身默认值，源码 `(eA.timeout ?? 60)*1e3`，无上限钳制），
+再给客户端超时分支打 fail-open 补丁（`allowed:!1` → `!0`，锚点唯一命中），
+让钩子基础设施故障**永远只降级不阻断**。
+
+**v2.6 · 钩子只装一处，WorkBuddyAI 那层是空的。** 早期注释断言"两个客户端的
+`getWorkbuddyConfigDir()` 一样，所以 `settings.json` 共用、钩子装一次就够"。
+实测是**错的**：
+
+| 产品 | `product.json` 的 `customUserDataDir` | 实际配置目录 |
+|---|---|---|
+| WorkBuddy | 未配置 | `~/.workbuddy` |
+| WorkBuddyAI | `.workbuddy-ai` | `~/.workbuddy-ai` |
+
+AI 桌面端据此把 `WORKBUDDY_CONFIG_DIR` 覆盖成 `.workbuddy-ai`，
+于是两个产品各读各的 `settings.json`。原来只写一处 ——
+WorkBuddyAI 的 L4/L5 **整层静默失效**：不报错、不提示，只是注入和守卫都不发生。
+v2.6 改为遍历主目录下所有 `.workbuddy*` 目录，逐个安装 / 校验 / 卸载。
+
+> 顺带修掉一个未爆的雷：v2.5 编辑时往钩子脚本注释混入了中文。
+> PS 5.1 对无 BOM 的 `.ps1` 按系统 ANSI（简中 = GBK）解析，UTF-8 中文会乱码，
+> 乱码字节一旦撞出引号或大括号就会破坏解析。现在钩子脚本回归纯 ASCII 并有自检项。
 
 ---
 
